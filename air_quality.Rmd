@@ -1,0 +1,745 @@
+---
+title: "air_quality"
+author: "Zibo Wang"
+date: "05/08/2020"
+output: html_document
+---
+
+```{r}
+# the data package has been pre-stored into the zip file, you do not need to download it again
+download.file("https://archive.ics.uci.edu/ml/machine-learning-databases/00501/PRSA2017_Data_20130301-20170228.zip", "air.zip")
+```
+```{r}
+# unzip the downloaded zip file
+unzip("air.zip")
+```
+follwing present all required packages
+```{r}
+library(Hmisc)
+library(corrplot)
+library(dplyr)
+library(glmnet)
+library(ggforce)
+library(caret)
+```
+## the whole folder contains 12 data set files collected from various location in Beijing, due to the computing power of the laptop, in this section we only used one of them for the regression model in later phase.  
+```{r}
+# read the data from one of the dataset files, and store it into the air variable 
+air <- read.csv('PRSA_Data_20130301-20170228/PRSA_Data_Guanyuan_20130301-20170228.csv', header=TRUE)
+# get column names
+colnames(air)
+```
+```{r}
+dim(air)
+```
+```{r}
+head(air, 10)
+```
+```{r}
+# By observing the dataset, the features "No" and "Station" could be regarded as the noisy variables, they were removed from the dataset in case having any negative impact on the results
+air <- subset(air, select = -c(No, station))
+```
+```{r}
+# beacause there are many NA (missing values) in the dataset, so wee need to fill these missing values firstly
+library(VIM)
+# Return a logical vector indicating how many cases are not complete 
+air[!complete.cases(air),]
+# to generate out how many NA values in the dataset
+sum(is.na(air))
+```
+```{r}
+library(mice)
+# 1 = observed, 0 = missing values
+# Rows and columns are sorted in increasing amounts of missing information. The last column and row contain row and column counts.
+md.pattern(air)
+```
+```{r}
+# Calculate the amount of missing values in each variable and the amount of missing values in certain combinations of variables.
+aggr(air, prop=T, numbers=T)
+# Available data is coded according to a continuous color scheme, missing data is visualized by red colour
+matrixplot(air)
+```
+```{r}
+# It is a relatively safe proportion that 5% of the general data volume has missing values
+miss <- function(x){sum(is.na(x))/length(x)*100}
+apply(air, 2, miss)
+```
+```{r}
+# find the number and the names of each cartegory in the column "wd"
+categories <- table(air$wd) 
+numberOfCategories <- length(categories)
+categories
+numberOfCategories
+```
+```{r}
+# encode the categorical variables into the numerical type
+wd <- data.frame(air$wd)
+wd[] <- lapply(wd, as.integer)
+anyNA(wd)
+sum(is.na(wd))
+```
+```{r}
+# replacing the categorical column "wd" with the new generated numerical dataframe "wd"
+air$wd <- wd
+air <- as.matrix(air)
+```
+```{r}
+air_newdata <- air
+air_1 <- mice(air_newdata,
+              m = 5,
+              method = 'pmm',
+              maxit = 50,
+              seed = 42)
+summary(air_1)
+```
+```{r}
+# to view the imputed data
+air_1$imp
+```
+```{r}
+# generating a completed dataset
+air_completedata <- complete(air_1)
+head(air_completedata)
+```
+```{r}
+# to check if there are any NA values in the dataset
+anyNA(air_completedata)
+```
+```{r}
+library(lattice)
+# Plotting the density curve of the 5 times multiple imputation data set
+# The red curve is the data density curve of each imputation dataset
+# The blue curve is the density curve of the observation data
+densityplot(air_1)
+stripplot(air_1, pch=12)
+```
+```{r}
+# Specify the required statistical method in the with function
+model <- with(air_1, lm(PM2.5~PM10+SO2+NO2+CO+O3+TEMP+PRES+DEWP+RAIN+wd+WSPM))
+# model_pooled is a list object containing the average results of m statistical analysis
+pooled <- pool(model)
+summary(pooled)
+```
+```{r}
+head(air_1)
+```
+```{r}
+#
+air.df <- as.data.frame(air)
+lm.fit <- lm(PM2.5~PM10+SO2+NO2+CO+O3+TEMP+PRES+DEWP+RAIN+wd+WSPM, 
+             data = air.df, 
+             na.action = na.omit)
+summary(lm.fit) 
+```
+```{r}
+# cormat : matrix of the correlation coefficients
+# pmat : matrix of the correlation p-values
+air_2 <- rcorr(as.matrix(air_completedata))
+air_2
+
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut],
+    p = pmat[ut]
+    )
+}
+
+flattenCorrMatrix(air_2$r, air_2$P)
+
+air_cor <- cor(air_completedata)
+corrplot(air_cor,
+         tl.cex = 0.8,
+         method = "color",
+         order = "AOE",
+         addCoef.col = "black",
+         number.cex = 0.5,
+         diag = FALSE)
+
+library(PerformanceAnalytics)
+chart.Correlation(air_completedata, 
+                  histogram=TRUE, 
+                  pch=19)
+```
+## after cleaning the dataset, strat to perform the elastic net regression 
+```{r}
+# store the values from air_completedata dataset into a new dataframe
+# at the moment, we only do for the univariate response regression, the "PM2.5" is regarded as the reponse
+# based on the correlation matrix plot, the features "year", "month", "day" and "hour" have quite weak correlation with the response variable, they will be eliminated from the dataset
+elnet_air <- air_completedata[,5:16]
+
+set.seed(123)
+# firstly, dividing the dataset into the training set and the testing set for the cross validation
+temp <- sample(2, 
+               nrow(elnet_air), 
+               replace = T, 
+               prob = c(0.75, 0.25))
+
+air.cv.set <- data.frame(temp)
+air.train <- elnet_air[temp == 1,]
+air.test <- elnet_air[temp == 2,]
+```
+# performing the cross validation in repeated cv
+```{r}
+# using the expand.grid() function to form the random combination of the alpha and lambda value
+air.grid <- expand.grid(.alpha = seq(0, 1, by = 0.1), 
+                        .lambda = seq(0, 1, by = 0.01))
+```
+```{r}
+# before we use the repeated cross-validation to train the model, we should set the seeds to run fully reproducible model
+set.seed(42)
+# set seeds for the 5 repeats cross validation
+# the generated object is one of the arguments in the following trainControl function
+# we are using the repeatedcv with number=10 and repeats=5, the length will be the (n_repeats*nresampling)+1
+air.seeds.cv5 <- vector(mode = "list", 
+                        length = 51)
+# the 50 in the loop is the (n_repeats*nresampling)
+# the 1111 in sample.int function is the number of tuning parameter combinations
+for(i in 1:50) air.seeds.cv5[[i]] <- sample.int(n = 2000, 
+                                                1111)
+air.seeds.cv5[[51]] <- sample.int(2000, 1)
+
+
+# set seeds for the 10 repeats cross validation
+air.seeds.cv10 <- vector(mode = "list", 
+                         length = 101)
+for(i in 1:100) air.seeds.cv10[[i]] <- sample.int(n = 2000, 
+                                                  1111)
+air.seeds.cv10[[101]] <- sample.int(2000, 1)
+
+
+# set seeds for the 15 repeats cross validation
+air.seeds.cv15 <- vector(mode = "list", 
+                         length = 151)
+for(i in 1:150) air.seeds.cv15[[i]] <- sample.int(n = 2000, 
+                                                  1111)
+air.seeds.cv15[[151]] <- sample.int(2000, 1)
+
+
+# set seeds for the 20 repeats cross validation
+air.seeds.cv20 <- vector(mode = "list", 
+                         length = 201)
+for(i in 1:200) air.seeds.cv20[[i]] <- sample.int(n = 2000, 
+                                                  1111)
+air.seeds.cv20[[201]] <- sample.int(2000, 1)
+```
+```{r}
+# here using the repeated cross-validation method 
+# number refers the folder numbers
+set.seed(42)
+# alpha = 1, lambda = 0.08
+air.control.rcv5 <- trainControl(method = "repeatedcv", 
+                                 number = 10, 
+                                 repeats = 5,
+                                 search = "random",
+                                 verboseIter = TRUE,
+                                 seeds = air.seeds.cv5)
+
+# alpha = 0.8, lambda = 0.1
+air.control.rcv10 <- trainControl(method = "repeatedcv", 
+                                number = 10, 
+                                repeats = 10,
+                                search = "random",
+                                verboseIter = TRUE,
+                                seeds = air.seeds.cv10)
+
+# alpha = 0.9, lambda = 0.09
+air.control.rcv15 <- trainControl(method = "repeatedcv", 
+                                number = 10, 
+                                repeats = 15,
+                                search = "random",
+                                verboseIter = TRUE,
+                                seeds = air.seeds.cv15)
+# alpha = 0.9, lambda = 0.09
+air.control.rcv20 <- trainControl(method = "repeatedcv", 
+                                number = 10, 
+                                repeats = 20,
+                                search = "random",
+                                verboseIter = TRUE,
+                                seeds = air.seeds.cv20)
+```
+```{r}
+# here we try to use the nested-loop cross-validation method
+# it is not suitbale to implement the nested-loop cv via the TANDEM package in this project, because the argument "upstream" only be able to take into the logical index vector, none of the features is in the format of the logical vector
+# library(TANDEM)
+# x <- as.matrix(air_completedata[,5:16])
+# y <- as.matrix(air_completedata$PM2.5)
+# upstream <- air_completedata[,5:16]
+# air.nlcv <- nested.cv(x,
+#                       y,
+#                       upstream,
+#                       method = "tandem",
+#                       family = "gaussian",
+#                       nfolds = 10,
+#                       nfolds_inner = 10,
+#                       foldid = NULL,
+#                       lambda_upstream = "lambda.1se",
+#                       lambda_downstream = "lambda.1se",
+#                       lambda_glmnet = "lambda.1se")
+```
+```{r}
+# library(tidymodels)
+# results <- nested_cv(air_completedata, 
+#                      outside = vfold_cv(repeats = 5), 
+#                      inside = bootstraps(times = 25))
+# results
+```
+```{r}
+# The code is mostly self-explanatory. This initial model will help to determine the appropriate values for the alpha and lambda parameters
+# this step is going to find the optimal values of the alpha and lambda in the model
+# Because we have pre-set 4 trCOntrol arguments, it will waste too much time to run all of them at the same time. We just run one of them, all pre-obtained results will be shown in next chunk.
+air.enet.train.rcv5 <- train(PM2.5~ ., 
+                             air.train, 
+                             method = "glmnet", 
+                             trControl = air.control.rcv5, 
+                             tuneGrid = air.grid)
+
+# air.enet.train.rcv10 <- train(PM2.5~ ., 
+#                         air.train, 
+#                         method = "glmnet", 
+#                         trControl = air.control.rcv10, 
+#                         tuneGrid = air.grid)
+# 
+# air.enet.train.rcv15 <- train(PM2.5~ ., 
+#                         air.train, 
+#                         method = "glmnet", 
+#                         trControl = air.control.rcv15, 
+#                         tuneGrid = air.grid)
+# 
+# air.enet.train.rcv20 <- train(PM2.5~ ., 
+#                         air.train, 
+#                         method = "glmnet", 
+#                         trControl = air.control.rcv20, 
+#                         tuneGrid = air.grid)
+air.enet.train.rcv5
+# air.enet.train.rcv10
+# air.enet.train.rcv15
+# air.enet.train.rcv20
+```
+```{r}
+# following shows the obtained tuning parameters by using four various repeated times cross-validation, because the seeds setting strategy has been changed in post stage of the project, so the running results will be different from the following list.
+
+# 5 times repeat: alpha = 1, lambda = 0.08
+# 10 times repeat: alpha = 0.8, lambda = 0.1
+# 15 times repeat: alpha = 0.9, lambda = 0.09
+# 20 times repeat: alpha = 0.9, lambda = 0.1
+
+# making matrices for the predictor variables and the outcome variable “PM2.5”
+air.predictor <- as.matrix(air.train[,-1])
+PM2.5 <- as.matrix(air.train$PM2.5)
+air.predictor.1 <- as.matrix(air.train)
+```
+```{r}
+air.enet.1 <- glmnet(air.predictor, 
+                     PM2.5, 
+                     family = "gaussian", 
+                     alpha = 1, 
+                     lambda = 0.08)
+
+air.enet.2 <- glmnet(air.predictor,
+                     PM2.5,
+                     family = "gaussian",
+                     alpha = 0.8,
+                     lambda = 0.1)
+
+air.enet.3 <- glmnet(air.predictor,
+                     PM2.5,
+                     family = "gaussian",
+                     alpha = 0.9,
+                     lambda = 0.1)
+air.enet.1
+air.enet.2
+air.enet.3
+# plot(air.enet.2, 
+#      xvar = "lambda",
+#      pch = 19,
+#      label = TRUE, 
+#      type.coef = "2norm",
+#      xlim = c(-2.5,-2.2))
+# layout(matrix(c(1,2,3),1,3))
+# plot(air.enet.3, xvar = "norm", label = TRUE,main='nrom\n')
+# plot(air.enet.3, xvar = "lambda", label = TRUE,main='lambda\n')
+# plot(air.enet.3, xvar = "dev", label = TRUE,main='dev\n')
+```
+```{r}
+# By using the glmnet package, the plot function cannot properly produce the graph. So we try to use the ensr package to produce.
+library(ensr)
+ensr_obj <- ensr(y = PM2.5, 
+                 x = air.predictor, 
+                 standardize = FALSE)
+```
+```{r}
+par(mfrow = c(1, 3))
+plot(preferable(ensr_obj), xvar = "norm")
+plot(preferable(ensr_obj), xvar = "lambda")
+```
+```{r}
+# look at specific coefficients by using the “coef” function.
+# only one parametes have been shrinkaged to zero.
+air.enet.coef.1 <- coef(air.enet.1,
+                        alpha = 1, 
+                        lambda = 0.08, 
+                        exact = T)
+
+air.enet.coef.2 <- coef(air.enet.2,
+                        alpha = 0.8, 
+                        lambda = 0.1, 
+                        exact = T)
+
+air.enet.coef.3 <- coef(air.enet.3,
+                        alpha = 0.9, 
+                        lambda = 0.09, 
+                        exact = T)
+
+air.enet.coef.1
+air.enet.coef.2
+air.enet.coef.3
+```
+```{r}
+# air.test.matrix <- model.matrix( ~ PM10 + SO2 + NO2 + CO + O3 + TEMP + PRES + DEWP + RAIN + wd + WSPM - 1, air.test)
+air.test.matrix <- as.matrix(air.test[,-1])
+
+air.enet.y.1 <- predict(air.enet.1, 
+                        newx = air.test.matrix, 
+                        type = "response", 
+                        lambda = 0.08, 
+                        alpha = 1)
+
+air.enet.y.2 <- predict(air.enet.2, 
+                        newx = air.test.matrix, 
+                        type = "response", 
+                        lambda = 0.1, 
+                        alpha = 0.8)
+
+air.enet.y.3 <- predict(air.enet.3, 
+                        newx = air.test.matrix, 
+                        type = "response", 
+                        lambda = 0.09, 
+                        alpha = 0.9)
+
+plot(air.enet.y.3)
+```
+```{r}
+# generating out the RMSE value by using the test data set
+# air.enet.resid <- air.enet.y.3 - air.test$PM2.5
+# RMSE = sqrt(mean(air.enet.resid^2))
+# RMSE
+
+data.frame(RMSE.r = RMSE(air.enet.y.1, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.1, air.test$PM2.5))
+
+data.frame(RMSE.r = RMSE(air.enet.y.2, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.2, air.test$PM2.5))
+
+data.frame(RMSE.r = RMSE(air.enet.y.3, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.3, air.test$PM2.5))
+```
+```{r}
+# as the number of features are reduce (see the numbers on the top of the plot) the MSE increases (y-axis). In addition, as the lambda increases, there is also an increase in the error but only when the number of variables is reduced as well.
+# do a cross-validation of our model. We need to set the seed and then use the “cv.glmnet” to develop the cross-validated model. We can see the model by plotting it.
+set.seed(317)
+# Does k-fold cross-validation for glmnet, produces a plot, and returns a value for lambda
+# do cv again for 100 times
+air.enet.cv.1 <- cv.glmnet(air.predictor, 
+                           PM2.5, 
+                           alpha = 1,
+                           nfolds = 100)
+
+air.enet.cv.2 <- cv.glmnet(air.predictor, 
+                           PM2.5, 
+                           alpha = 0.8,
+                           nfolds = 100)
+
+air.enet.cv.3 <- cv.glmnet(air.predictor, 
+                           PM2.5, 
+                           alpha = 0.9,
+                           nfolds = 100)
+
+air.enet.cv.4 <- cv.glmnet(air.predictor, 
+                           PM2.5, 
+                           alpha = 0.7,
+                           nfolds = 100)
+
+air.enet.cv.5 <- cv.glmnet(air.predictor, 
+                           PM2.5, 
+                           alpha = 0.6,
+                           nfolds = 100)
+
+air.enet.cv.6 <- cv.glmnet(air.predictor, 
+                           PM2.5, 
+                           alpha = 0.5,
+                           nfolds = 100)
+
+air.enet.cv.7 <- cv.glmnet(air.predictor, 
+                           PM2.5, 
+                           alpha = 0.4,
+                           nfolds = 100)
+
+air.enet.cv.8 <- cv.glmnet(air.predictor, 
+                           PM2.5, 
+                           alpha = 0.3,
+                           nfolds = 100)
+
+air.enet.cv.9 <- cv.glmnet(air.predictor, 
+                           PM2.5, 
+                           alpha = 0.2,
+                           nfolds = 100)
+
+air.enet.cv.10 <- cv.glmnet(air.predictor, 
+                           PM2.5, 
+                           alpha = 0.1,
+                           nfolds = 100)
+
+air.enet.cv.11 <- cv.glmnet(air.predictor, 
+                           PM2.5, 
+                           alpha = 0,
+                           nfolds = 100)
+
+plot(air.enet.cv.1)
+plot(air.enet.cv.2)
+plot(air.enet.cv.3)
+air.enet.cv.1
+air.enet.cv.2
+air.enet.cv.3
+```
+```{r}
+# air.enet.cv.1$lambda.min
+air.enet.cv.1$lambda.1se
+
+# air.enet.cv.2$lambda.min
+air.enet.cv.2$lambda.1se
+
+# air.enet.cv.3$lambda.min
+air.enet.cv.3$lambda.1se
+
+air.enet.cv.4$lambda.1se
+air.enet.cv.5$lambda.1se
+air.enet.cv.6$lambda.1se
+air.enet.cv.7$lambda.1se
+air.enet.cv.8$lambda.1se
+air.enet.cv.9$lambda.1se
+air.enet.cv.10$lambda.1se
+air.enet.cv.11$lambda.1se
+```
+```{r}
+coef(air.enet.cv.1, s = "lambda.1se")
+coef(air.enet.cv.1, s = "lambda.min")
+```
+```{r}
+coef(air.enet.cv.2, s = "lambda.1se")
+coef(air.enet.cv.2, s = "lambda.min")
+```
+```{r}
+coef(air.enet.cv.3, s = "lambda.1se")
+coef(air.enet.cv.3, s = "lambda.min")
+
+coef(air.enet.cv.4, s = "lambda.1se")
+
+coef(air.enet.cv.5, s = "lambda.1se")
+
+coef(air.enet.cv.6, s = "lambda.1se")
+
+coef(air.enet.cv.7, s = "lambda.1se")
+
+coef(air.enet.cv.8, s = "lambda.1se")
+
+coef(air.enet.cv.9, s = "lambda.1se")
+
+coef(air.enet.cv.10, s = "lambda.1se")
+
+coef(air.enet.cv.11, s = "lambda.1se")
+```
+```{r}
+air.enet.y.cv.1 <- predict(air.enet.cv.1, 
+                           newx = air.test.matrix, 
+                           type = 'response', 
+                           lambda = "lambda.1se", 
+                           alpha = 1)
+
+data.frame(RMSE.r = RMSE(air.enet.y.cv.1, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.cv.1, air.test$PM2.5))
+
+air.enet.y.cv.2 <- predict(air.enet.cv.2, 
+                           newx = air.test.matrix, 
+                           type = 'response', 
+                           lambda = "lambda.1se", 
+                           alpha = 0.8)
+
+data.frame(RMSE.r = RMSE(air.enet.y.cv.2, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.cv.2, air.test$PM2.5))
+
+air.enet.y.cv.3 <- predict(air.enet.cv.3, 
+                           newx = air.test.matrix, 
+                           type = 'response', 
+                           lambda = "lambda.1se", 
+                           alpha = 0.9)
+
+data.frame(RMSE.r = RMSE(air.enet.y.cv.3, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.cv.3, air.test$PM2.5))
+
+air.enet.y.cv.4 <- predict(air.enet.cv.4, 
+                           newx = air.test.matrix, 
+                           type = 'response', 
+                           lambda = "lambda.1se", 
+                           alpha = 0.7)
+
+data.frame(RMSE.r = RMSE(air.enet.y.cv.4, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.cv.4, air.test$PM2.5))
+
+air.enet.y.cv.5 <- predict(air.enet.cv.5, 
+                           newx = air.test.matrix, 
+                           type = 'response', 
+                           lambda = "lambda.1se", 
+                           alpha = 0.6)
+
+data.frame(RMSE.r = RMSE(air.enet.y.cv.5, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.cv.5, air.test$PM2.5))
+
+air.enet.y.cv.6 <- predict(air.enet.cv.6, 
+                           newx = air.test.matrix, 
+                           type = 'response', 
+                           lambda = "lambda.1se", 
+                           alpha = 0.5)
+
+data.frame(RMSE.r = RMSE(air.enet.y.cv.6, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.cv.6, air.test$PM2.5))
+
+air.enet.y.cv.7 <- predict(air.enet.cv.7, 
+                           newx = air.test.matrix, 
+                           type = 'response', 
+                           lambda = "lambda.1se", 
+                           alpha = 0.4)
+
+data.frame(RMSE.r = RMSE(air.enet.y.cv.3, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.cv.3, air.test$PM2.5))
+
+air.enet.y.cv.8 <- predict(air.enet.cv.8, 
+                           newx = air.test.matrix, 
+                           type = 'response', 
+                           lambda = "lambda.1se", 
+                           alpha = 0.3)
+
+data.frame(RMSE.r = RMSE(air.enet.y.cv.3, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.cv.3, air.test$PM2.5))
+
+air.enet.y.cv.9 <- predict(air.enet.cv.9, 
+                           newx = air.test.matrix, 
+                           type = 'response', 
+                           lambda = "lambda.1se", 
+                           alpha = 0.2)
+
+data.frame(RMSE.r = RMSE(air.enet.y.cv.9, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.cv.9, air.test$PM2.5))
+
+air.enet.y.cv.10 <- predict(air.enet.cv.10, 
+                           newx = air.test.matrix, 
+                           type = 'response', 
+                           lambda = "lambda.1se", 
+                           alpha = 0.1)
+
+data.frame(RMSE.r = RMSE(air.enet.y.cv.10, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.cv.10, air.test$PM2.5))
+
+air.enet.y.cv.11 <- predict(air.enet.cv.11, 
+                           newx = air.test.matrix, 
+                           type = 'response', 
+                           lambda = "lambda.1se", 
+                           alpha = 0.0)
+
+data.frame(RMSE.r = RMSE(air.enet.y.cv.11, air.test$PM2.5),
+           Rsquare.r = R2(air.enet.y.cv.11, air.test$PM2.5))
+```
+```{r}
+n <- nrow(air.test)
+plot(1:n, air.test$PM2.5, pch=16)
+lines(1:n, air.enet.y.3, type="l", col="red")
+```
+## Implementing the univariate reponse elastic net regression via the ensr package for modeling the PM2.5 in the air quality dataset constructed above, and compare the results by using the glmnet package. 
+## the reference is from:https://cran.r-project.org/web/packages/ensr/vignettes/ensr-examples.html
+## Since the effect of the final fitted model is not ideal, its obtained results will not be included in the discussion of the project
+```{r}
+library(ensr)
+```
+```{r}
+set.seed(127)
+air.y.matrix_ensr <- as.matrix(air_completedata$PM2.5)
+air.x.matrix_ensr <- as.matrix(air_completedata[,-1:-5])
+
+# air.ensr_obj is a ensr object, which is a list of cv.glmnet objects. The length of the list is determined by the length of the alphas argument. The default for alphas is seq(0, 1, length = 10)
+air.ensr_obj <- ensr(y = air.y.matrix_ensr, 
+                     x = air.x.matrix_ensr, 
+                     standardize = FALSE)
+air.ensr_obj
+```
+```{r}
+# returns a data.table with values of λ, α
+# cvm: the mean cross-validation error
+# nzero: the number of non-zero coefficients
+# l_index: the list index of the ensr object associated with the noted α value.
+air.ensr_obj.summary <- summary(object = air.ensr_obj)
+air.ensr_obj.summary
+```
+```{r}
+# The preferable model could be the one with the minimum cross-validation error
+# By comparing the obtained results with glmnet, the result is very unsatisfactory 
+air.ensr_obj.summary[cvm == min(cvm)]
+```
+```{r}
+# A quick way to get the preferable model is to call the preferable method.
+str(preferable(air.ensr_obj), 
+    max.level = 1L)
+```
+```{r}
+par(mfrow = c(1, 3))
+plot(preferable(air.ensr_obj), xvar = "norm")
+plot(preferable(air.ensr_obj), xvar = "lambda")
+```
+```{r}
+# In the plot below, each of the λ (y-axis, log10 scale) and α (x-axis) values considered in the ensr_obj are plotted. The coloring is denoted as log10(z) where z = (cvm - min(cvm)) / sd(cvm). 
+# The color scale is set to have low values (values near the minimum mean cross validation error) be dark green. Values moving further from the minimum are lighter green, then white, then purple. A red cross identifies the minimum mean cross-validation error.
+plot(air.ensr_obj)
+```
+```{r}
+# plot(air.ensr_obj) +
+#      theme_minimal() +
+#      facet_zoom(x = 0.50 < alpha & alpha < 1.00, y = 0 < lambda & lambda < 1e+03)
+```
+```{r}
+summary(air.ensr_obj)[cvm == min(cvm)]
+```
+```{r}
+# by observing the above plot suggests there are many other minimum values worth considering
+summary(air.ensr_obj)[, .SD[cvm == min(cvm)], by = alpha][l_index %in% c(1, 3, 5, 7, 9, 11, 13, 15, 17, 19)]
+```
+```{r}
+# Based on the above results, we could know the difference in the mean cross validation error between these two results is very small and may not be meaningful. The number of non-zero (nzero) coefficients is also same. The results also prove while alpha equaps to 1 (Lasso regression) could shrinkage coefficients to zero.
+# If parsimony is the primary objective, the model with less non-zero coefficients will be better.
+summary(air.ensr_obj)[, .SD[cvm == min(cvm)], by = nzero]
+```
+```{r}
+plot(air.ensr_obj, type = 2)
+```
+```{r}
+plot(air.ensr_obj, type = 2) +
+     theme_bw() +
+     aes(x = nzero, y = cvm) +
+     geom_point() +
+     geom_line() +
+     facet_zoom(xy = cvm < 890)
+```
+```{r}
+summary(air.ensr_obj)[nzero %in% c(7, 8)] [, .SD[cvm == min(cvm)], by = nzero]
+```
+```{r}
+plot(air.ensr_obj, type = c(1, 2))
+```
+```{r}
+# s refers the value of the obtained lambda from previous chunk
+air.coef7 <- coef(air.ensr_obj[[15]], s = 19.071418	)
+air.coef8 <- coef(air.ensr_obj[[19]], s = 7.586477)
+```
+```{r}
+coef(air.ensr_obj)
+```

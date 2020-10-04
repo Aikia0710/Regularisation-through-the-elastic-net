@@ -1,0 +1,500 @@
+---
+title: "elastic_net"
+author: "Zibo Wang"
+date: "08/06/2020"
+output: html_document
+---
+
+```{r}
+# the data package has been pre-stored into the zip file, you do not need to download it again.
+download.file("https://archive.ics.uci.edu/ml/machine-learning-databases/parkinsons/telemonitoring/parkinsons_updrs.data", "parkinsons_updrs.data")
+```
+## The main aim of the data was to predict the total UPDRS scores ('total_UPDRS') from the 16 measure variables. UPDRS refers to the Unified Parkinson's Disease Rating Scale, which is a rating tool used to gauge the course of Parkinson’s disease in patients.
+```{r}
+parkinsons <- read.csv('parkinsons_updrs.data', header=TRUE)
+```
+
+```{r}
+# Unified Parkinson's Disease Rating Scale (UPDRS)
+dim(parkinsons)
+names(parkinsons)
+```
+
+```{r}
+anyNA(parkinsons)
+summary(parkinsons)
+```
+```{r}
+# because there is no missings in the dataset, we only need to delete the first column subject, which is a index
+parkinsons <- subset(parkinsons, select = -c(subject.))
+head(parkinsons, 10)
+```
+```{r}
+# import all used packages
+library(Hmisc)
+library(corrplot)
+library(glmnet)
+library(ggforce)
+library(caret)
+library(PerformanceAnalytics)
+```
+```{r}
+my_data <- rcorr(as.matrix(parkinsons))
+my_data
+
+parkinsons_cor <- cor(parkinsons)
+corrplot(parkinsons_cor,
+         tl.cex = 0.8,
+         method = "color",
+         order = "AOE",
+         addCoef.col = "black",
+         number.cex = 0.4,
+         diag = FALSE)
+
+chart.Correlation(parkinsons, 
+                  histogram=TRUE, 
+                  pch=19)
+```
+# reference from website: https://educationalresearchtechniques.com/2017/04/14/elastic-net-regression-in-r/
+```{r}
+park.elnet.parkinsons <- parkinsons
+
+# divide the data into training set and testing set, with the ratio of 7:3
+# the nrow function was used to get the row number of the data set
+park.temp <- sample(2, 
+                    nrow(park.elnet.parkinsons), 
+                    replace = T, 
+                    prob = c(0.7, 0.3))
+park.cv_set <- data.frame(park.temp)
+park.train_set <- park.elnet.parkinsons[park.temp == 1,]
+park.test_set <- park.elnet.parkinsons[park.temp == 2,]
+```
+```{r}
+# by using the expand.grid() function to form the random combination of the alpha and lambda value
+# we have 2 tuning parameters with a 11 different levels on alpha and 101 different levels on lambda, and we will have 1111 rows in the tuning grid
+park.grid <- expand.grid(.alpha = seq(0, 1, by = 0.1), 
+                         .lambda = seq(0, 1, by = 0.01))
+```
+```{r}
+# before we use the repeated cross-validation to train the model, we should set the seeds to run fully reproducible model
+set.seed(42)
+# set seeds for the 5 repeats cross validation
+# the generated object is one of the arguments in the following trainControl function
+# we are using the repeatedcv with number=10 and repeats=5, the length will be the (n_repeats*nresampling)+1
+park.seeds.cv5 <- vector(mode = "list", 
+                         length = 51)
+# the 50 in the loop is the (n_repeats*nresampling)
+# the 1111 in sample.int function is the number of tuning parameter combinations
+for(i in 1:50) park.seeds.cv5[[i]] <- sample.int(n = 2000, 
+                                                 1111)
+park.seeds.cv5[[51]] <- sample.int(2000, 1)
+
+# set seeds for the 10 repeats cross validation
+park.seeds.cv10 <- vector(mode = "list", 
+                          length = 101)
+for(i in 1:100) park.seeds.cv10[[i]] <- sample.int(n = 2000, 
+                                                   1111)
+park.seeds.cv10[[101]] <- sample.int(2000, 1)
+
+# set seeds for the 15 repeats cross validation
+park.seeds.cv15 <- vector(mode = "list", 
+                          length = 151)
+for(i in 1:150) park.seeds.cv15[[i]] <- sample.int(n = 2000, 
+                                                   1111)
+park.seeds.cv15[[151]] <- sample.int(2000, 1)
+
+# set seeds for the 20 repeats cross validation
+park.seeds.cv20 <- vector(mode = "list", 
+                          length = 201)
+for(i in 1:200) park.seeds.cv20[[i]] <- sample.int(n = 2000, 
+                                                   1111)
+park.seeds.cv20[[201]] <- sample.int(2000, 1)
+```
+```{r}
+set.seed(142)
+park.control_cv5 <- trainControl(method = "repeatedcv", 
+                                 number = 10, 
+                                 repeats = 5,
+                                 search = "random",
+                                 verboseIter = TRUE,
+                                 seeds = park.seeds.cv5)
+
+park.control_cv10 <- trainControl(method = "repeatedcv",
+                                  number = 10,
+                                  repeats = 10,
+                                  search = "random",
+                                  verboseIter = TRUE,
+                                  seeds = park.seeds.cv10)
+
+park.control_cv15 <- trainControl(method = "repeatedcv",
+                                  number = 10,
+                                  repeats = 15,
+                                  search = "random",
+                                  verboseIter = TRUE,
+                                  seeds = park.seeds.cv15)
+
+park.control_cv20 <- trainControl(method = "repeatedcv",
+                                  number = 10,
+                                  repeats = 20,
+                                  search = "random",
+                                  verboseIter = TRUE,
+                                  seeds = park.seeds.cv20)
+```
+```{r}
+# The code is mostly self-explanatory. This initial model will help to determine the appropriate values for the alpha and lambda parameters
+# Because we have pre-set 4 trCOntrol arguments, it will waste too much time to run all of them at the same time. We just run one of them, all pre-obtained results will be shown in next chunk.
+park.enet.train.cv5 <- train(total_UPDRS ~ ., 
+                             park.train_set, 
+                             method = "glmnet", 
+                             trControl = park.control_cv5, 
+                             tuneGrid = park.grid)
+
+# park.enet.train.cv10 <- train(total_UPDRS ~ ., 
+#                          park.train_set, 
+#                          method = "glmnet", 
+#                          trControl = park.control_cv10, 
+#                          tuneGrid = park.grid)
+# 
+# park.enet.train.cv15 <- train(total_UPDRS ~ ., 
+#                          park.train_set, 
+#                          method = "glmnet", 
+#                          trControl = park.control_cv15, 
+#                          tuneGrid = park.grid)
+# 
+# park.enet.train.cv20 <- train(total_UPDRS ~ ., 
+#                          park.train_set, 
+#                          method = "glmnet", 
+#                          trControl = park.control_cv20, 
+#                          tuneGrid = park.grid)
+
+park.enet.train.cv5
+# park.enet.train.cv10
+# park.enet.train.cv15
+# park.enet.train.cv20
+```
+```{r}
+# following shows the obtained tuning parameters by using four various repeated times cross-validation, because the seeds setting strategy has been changed in post stage of the project, so the running results will be different from the following list.
+
+# 5 times repeat: alpha = 0.1, lambda = 0.04
+# 10 times repeat: alpha = 0.1, lambda = 0.03
+# 15 times repeat: alpha = 0.1, lambda = 0.03
+# 20 times repeat: alpha = 0.1, lambda = 0.03
+
+# converting the train set as the predictor variables 
+park.predictor <- as.matrix(park.train_set[,-5])
+totalUPDRS <- as.matrix(park.train_set$total_UPDRS)
+
+park.enet.1 <- glmnet(park.predictor, 
+                      totalUPDRS, 
+                      family = "gaussian", 
+                      alpha = 0.1, 
+                      lambda = 0.04)
+
+park.enet.2 <- glmnet(park.predictor, 
+                      totalUPDRS, 
+                      family = "gaussian", 
+                      alpha = 0.1, 
+                      lambda = 0.03)
+park.enet.1
+park.enet.2
+```
+```{r}
+# look at specific coefficient by using the “coef” function.
+# only one parametes have been shrinkaged to zero.
+park.enet.coef.1 <- coef(park.enet.1, 
+                         lambda = 0.04, 
+                         alpha = 0.1, 
+                         exact = T)
+
+park.enet.coef.2 <- coef(park.enet.2, 
+                         lambda = 0.03, 
+                         alpha = 0.1, 
+                         exact = T)
+park.enet.coef.1
+park.enet.coef.2
+```
+```{r}
+# We now can test it using the predict function. However, we first need to convert our test set into a matrix and remove the outcome variable from it
+park.test.matrix <- as.matrix(park.test_set[,-5])
+park.enet.y.1 <- predict(park.enet.1, 
+                         newx = park.test.matrix, 
+                         type = "response", 
+                         lambda = 0.04, 
+                         alpha = 0.1)
+
+park.enet.y.2 <- predict(park.enet.2, 
+                         newx = park.test.matrix, 
+                         type = "response", 
+                         lambda = 0.03, 
+                         alpha = 0.1)
+plot(park.enet.y.1)
+plot(park.enet.y.2)
+```
+```{r}
+# does not really help
+# enet.y v.s response value
+# give one colour to different age range
+library(ggplot2)
+ggplot(park.test_set, aes(x = park.enet.y.1, 
+                          y = park.test_set$total_UPDRS, 
+                          colour = age)) + geom_point()
+``` 
+```{r}
+# generating out the RMSE and R2 value
+# park.enet.resid <- park.enet.y.1 - park.test_set$total_UPDRS
+# RMSE = sqrt(mean(park.enet.resid^2))
+# RMSE
+
+data.frame(RMSE.r = RMSE(park.enet.y.1, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.1, park.test_set$total_UPDRS))
+
+data.frame(RMSE.r = RMSE(park.enet.y.2, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.2, park.test_set$total_UPDRS))
+```
+```{r}
+# as the number of features are reduce (see the numbers on the top of the plot) the MSE increases (y-axis). In addition, as the lambda increases, there is also an increase in the error but only when the number of variables is reduced as well.
+set.seed(317)
+# Does k-fold cross-validation for glmnet, produces a plot, and returns a value for lambda
+# do cv again for 100 times
+park.enet.cv.1 <- cv.glmnet(park.predictor, 
+                            totalUPDRS, 
+                            alpha = 1,
+                            nfolds = 100)
+
+park.enet.cv.2 <- cv.glmnet(park.predictor, 
+                            totalUPDRS, 
+                            alpha = 0.9,
+                            nfolds = 100)
+
+park.enet.cv.3 <- cv.glmnet(park.predictor, 
+                            totalUPDRS, 
+                            alpha = 0.8,
+                            nfolds = 100)
+
+park.enet.cv.4 <- cv.glmnet(park.predictor, 
+                            totalUPDRS, 
+                            alpha = 0.7,
+                            nfolds = 100)
+
+park.enet.cv.5 <- cv.glmnet(park.predictor, 
+                            totalUPDRS, 
+                            alpha = 0.6,
+                            nfolds = 100)
+
+park.enet.cv.6 <- cv.glmnet(park.predictor, 
+                            totalUPDRS, 
+                            alpha = 0.5,
+                            nfolds = 100)
+
+park.enet.cv.7 <- cv.glmnet(park.predictor, 
+                            totalUPDRS, 
+                            alpha = 0.4,
+                            nfolds = 100)
+
+park.enet.cv.8 <- cv.glmnet(park.predictor, 
+                            totalUPDRS, 
+                            alpha = 0.3,
+                            nfolds = 100)
+
+park.enet.cv.9 <- cv.glmnet(park.predictor, 
+                            totalUPDRS, 
+                            alpha = 0.2,
+                            nfolds = 100)
+
+park.enet.cv.10 <- cv.glmnet(park.predictor, 
+                            totalUPDRS, 
+                            alpha = 0.1,
+                            nfolds = 100)
+
+park.enet.cv.11 <- cv.glmnet(park.predictor, 
+                            totalUPDRS, 
+                            alpha = 0,
+                            nfolds = 100)
+plot(park.enet.cv.1)
+plot(park.enet.cv.2)
+plot(park.enet.cv.3)
+park.enet.cv.1
+park.enet.cv.2
+park.enet.cv.3
+park.enet.cv.4
+park.enet.cv.5
+park.enet.cv.6
+park.enet.cv.7
+park.enet.cv.8
+park.enet.cv.9
+park.enet.cv.10
+park.enet.cv.11
+```
+```{r}
+# lambda.min is the value of λ that gives minimum mean cross-validated error
+# lambda.1se gives the most regularized model such that error is within one standard error of the minimum.
+park.enet.cv.1$lambda.min
+park.enet.cv.1$lambda.1se
+
+park.enet.cv.2$lambda.1se
+park.enet.cv.3$lambda.1se
+park.enet.cv.4$lambda.1se
+park.enet.cv.5$lambda.1se
+park.enet.cv.6$lambda.1se
+park.enet.cv.7$lambda.1se
+park.enet.cv.8$lambda.1se
+park.enet.cv.9$lambda.1se
+park.enet.cv.10$lambda.1se
+park.enet.cv.11$lambda.1se
+```
+```{r}
+coef(park.enet.cv.1, s = "lambda.1se")
+coef(park.enet.cv.1, s = "lambda.min")
+
+coef(park.enet.cv.2, s = "lambda.1se")
+coef(park.enet.cv.3, s = "lambda.1se")
+coef(park.enet.cv.4, s = "lambda.1se")
+coef(park.enet.cv.5, s = "lambda.1se")
+coef(park.enet.cv.6, s = "lambda.1se")
+coef(park.enet.cv.7, s = "lambda.1se")
+coef(park.enet.cv.8, s = "lambda.1se")
+coef(park.enet.cv.9, s = "lambda.1se")
+coef(park.enet.cv.10, s = "lambda.1se")
+coef(park.enet.cv.11, s = "lambda.1se")
+```
+```{r}
+park.enet.y.cv.1 <- predict(park.enet.cv.1, 
+                            newx = park.test.matrix, 
+                            type='response', 
+                            lambda = "lambda.1se", 
+                            alpha = 1)
+# enet.cv.resid <- enet.y.cv - test_set$total_UPDRS
+# RMSE = sqrt(mean(enet.cv.resid^2))
+# RMSE
+data.frame(RMSE.r = RMSE(park.enet.y.cv.1, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.cv.1, park.test_set$total_UPDRS))
+
+park.enet.y.cv.2 <- predict(park.enet.cv.2, 
+                            newx = park.test.matrix, 
+                            type='response', 
+                            lambda = "lambda.1se", 
+                            alpha = 0.9)
+data.frame(RMSE.r = RMSE(park.enet.y.cv.2, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.cv.2, park.test_set$total_UPDRS))
+
+park.enet.y.cv.3 <- predict(park.enet.cv.3, 
+                            newx = park.test.matrix, 
+                            type='response', 
+                            lambda = "lambda.1se", 
+                            alpha = 0.8)
+data.frame(RMSE.r = RMSE(park.enet.y.cv.3, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.cv.3, park.test_set$total_UPDRS))
+
+park.enet.y.cv.4 <- predict(park.enet.cv.4, 
+                            newx = park.test.matrix, 
+                            type='response', 
+                            lambda = "lambda.1se", 
+                            alpha = 0.7)
+data.frame(RMSE.r = RMSE(park.enet.y.cv.4, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.cv.4, park.test_set$total_UPDRS))
+
+park.enet.y.cv.5 <- predict(park.enet.cv.5, 
+                            newx = park.test.matrix, 
+                            type='response', 
+                            lambda = "lambda.1se", 
+                            alpha = 0.6)
+data.frame(RMSE.r = RMSE(park.enet.y.cv.5, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.cv.5, park.test_set$total_UPDRS))
+
+park.enet.y.cv.6 <- predict(park.enet.cv.6, 
+                            newx = park.test.matrix, 
+                            type='response', 
+                            lambda = "lambda.1se", 
+                            alpha = 0.5)
+data.frame(RMSE.r = RMSE(park.enet.y.cv.6, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.cv.6, park.test_set$total_UPDRS))
+
+park.enet.y.cv.7 <- predict(park.enet.cv.7, 
+                            newx = park.test.matrix, 
+                            type='response', 
+                            lambda = "lambda.1se", 
+                            alpha = 0.4)
+data.frame(RMSE.r = RMSE(park.enet.y.cv.7, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.cv.7, park.test_set$total_UPDRS))
+
+park.enet.y.cv.8 <- predict(park.enet.cv.8, 
+                            newx = park.test.matrix, 
+                            type='response', 
+                            lambda = "lambda.1se", 
+                            alpha = 0.3)
+data.frame(RMSE.r = RMSE(park.enet.y.cv.8, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.cv.8, park.test_set$total_UPDRS))
+
+park.enet.y.cv.9 <- predict(park.enet.cv.9, 
+                            newx = park.test.matrix, 
+                            type='response', 
+                            lambda = "lambda.1se", 
+                            alpha = 0.2)
+data.frame(RMSE.r = RMSE(park.enet.y.cv.9, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.cv.9, park.test_set$total_UPDRS))
+
+park.enet.y.cv.10 <- predict(park.enet.cv.10, 
+                             newx = park.test.matrix, 
+                             type='response', 
+                             lambda = "lambda.1se", 
+                             alpha = 0.1)
+data.frame(RMSE.r = RMSE(park.enet.y.cv.10, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.cv.10, park.test_set$total_UPDRS))
+
+park.enet.y.cv.11 <- predict(park.enet.cv.11, 
+                             newx = park.test.matrix, 
+                             type='response', 
+                             lambda = "lambda.1se", 
+                             alpha = 0)
+data.frame(RMSE.r = RMSE(park.enet.y.cv.11, park.test_set$total_UPDRS),
+           Rsquare.r = R2(park.enet.y.cv.11, park.test_set$total_UPDRS))
+```
+## performing the Ridge regression in another way
+```{r}
+# predictor 
+x_3 <- model.matrix(total_UPDRS~., park.train_set)
+# response
+y_3 <- park.train_set$total_UPDRS
+```
+```{r}
+cv.ridge <- cv.glmnet(x_3, 
+                      y_3, 
+                      alpha = 0)
+cv.ridge$lambda.1se
+model.ridge <- glmnet(x_3, 
+                      y_3, 
+                      alpha = 0, 
+                      lambda = cv.ridge$lambda.1se)
+coef(model.ridge)
+```
+```{r}
+library(dplyr) 
+x.test.ridge <- model.matrix(total_UPDRS ~., park.test_set)
+predictions.ridge <- model.ridge %>% predict(x.test.ridge) %>% as.vector()
+```
+```{r}
+data.frame(
+  RMSE.r = RMSE(predictions.ridge, park.test_set$total_UPDRS),
+  Rsquare.r = R2(predictions.ridge, park.test_set$total_UPDRS))
+```
+## performing the lasso regression in another way
+```{r}
+cv.lasso <- cv.glmnet(x_3, 
+                      y_3, 
+                      alpha = 1)
+cv.lasso$lambda.1se
+model.lasso <- glmnet(x_3, 
+                      y_3, 
+                      alpha = 1, 
+                      lambda = cv.lasso$lambda.1se)
+coef(model.lasso)
+```
+```{r}
+x.test.lasso <- model.matrix(total_UPDRS ~., park.test_set)
+predictions.lasso <- model.lasso %>% predict(x.test.lasso) %>% as.vector()
+```
+```{r}
+data.frame(
+  RMSE.l = RMSE(predictions.lasso, park.test_set$total_UPDRS),
+  Rsquare.l = R2(predictions.lasso, park.test_set$total_UPDRS))
+```
